@@ -39,12 +39,17 @@ def _get_inner_dit(model) -> torch.nn.Module:
 
 
 def _prepare_cond_image(image: torch.Tensor, latent_h: int, latent_w: int,
-                        device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+                        device: torch.device, dtype: torch.dtype,
+                        patch_spatial: int = 2) -> torch.Tensor:
     """ComfyUI IMAGE (B,H,W,3) in [0,1] → (1,3,H*8,W*8) in [-1,1].
 
     The LLLite ``conditioning1`` Conv has stride 16, so the cond image must be
     sized to ``latent_HW * 8`` in input pixel space (= ``token_HW * 16`` after
-    DiT patchify with patch_spatial=2).
+    DiT patchify with patch_spatial=2). The DiT internally pads the latent up
+    to a multiple of ``patch_spatial`` (see ``MiniTrainDIT.forward`` →
+    ``pad_to_patch_size``), so we mirror that rounding here — otherwise odd
+    latent dims (e.g. 1032 px → 129 latent) yield a token-count mismatch that
+    silently bypasses every LLLite module.
     """
     if image.ndim == 4 and image.shape[-1] == 3:
         # (B, H, W, 3) -> (B, 3, H, W)
@@ -53,8 +58,10 @@ def _prepare_cond_image(image: torch.Tensor, latent_h: int, latent_w: int,
         raise ValueError(f"Unexpected cond image shape: {tuple(image.shape)} (expected B,H,W,3)")
 
     img = img[:1]  # use first frame only
-    target_h = latent_h * 8
-    target_w = latent_w * 8
+    padded_h = ((latent_h + patch_spatial - 1) // patch_spatial) * patch_spatial
+    padded_w = ((latent_w + patch_spatial - 1) // patch_spatial) * patch_spatial
+    target_h = padded_h * 8
+    target_w = padded_w * 8
     if img.shape[-2] != target_h or img.shape[-1] != target_w:
         img = F.interpolate(img, size=(target_h, target_w), mode="bicubic", align_corners=False)
         img = img.clamp(0.0, 1.0)
@@ -103,6 +110,7 @@ class AnimaLLLiteApply:
             aspp_dilations = ASPP_DEFAULT_DILATIONS
 
         dit = _get_inner_dit(model)
+        patch_spatial = int(getattr(dit, "patch_spatial", 2))
         lllite = ControlNetLLLiteDiT(
             dit,
             cond_emb_dim=ce_dim,
@@ -155,7 +163,7 @@ class AnimaLLLiteApply:
             key = (latent_h, latent_w, device, dtype)
             if cache["key"] != key or cache["cond_image_pp"] is None:
                 cache["cond_image_pp"] = _prepare_cond_image(
-                    src_image, latent_h, latent_w, device, dtype
+                    src_image, latent_h, latent_w, device, dtype, patch_spatial
                 )
                 cache["key"] = key
 
