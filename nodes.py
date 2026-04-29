@@ -71,6 +71,8 @@ class AnimaLLLiteApply:
                 "lllite_name": (folder_paths.get_filename_list("controlnet"),),
                 "image": ("IMAGE",),
                 "strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
             },
         }
 
@@ -78,7 +80,7 @@ class AnimaLLLiteApply:
     FUNCTION = "apply"
     CATEGORY = "loaders"
 
-    def apply(self, model, lllite_name, image, strength):
+    def apply(self, model, lllite_name, image, strength, start_percent, end_percent):
         weights_path = folder_paths.get_full_path("controlnet", lllite_name)
         if weights_path is None or not os.path.isfile(weights_path):
             raise FileNotFoundError(f"LLLite weights not found: {lllite_name}")
@@ -115,6 +117,11 @@ class AnimaLLLiteApply:
         load_lllite_weights(lllite, weights_path, strict=False)
         lllite.eval().requires_grad_(False)
 
+        # Convert percent range -> sigma range (start_percent=0 → sigma_max).
+        model_sampling = model.get_model_object("model_sampling")
+        sigma_start = float(model_sampling.percent_to_sigma(start_percent))
+        sigma_end = float(model_sampling.percent_to_sigma(end_percent))
+
         # Capture image tensor (cloned to detach from any upstream caching)
         src_image = image.detach().clone()
 
@@ -125,6 +132,13 @@ class AnimaLLLiteApply:
             input_x = args["input"]
             timestep = args["timestep"]
             c = args["c"]
+
+            # Step-range gate: skip LLLite entirely when current sigma is outside
+            # [sigma_end, sigma_start]. percent_to_sigma maps 0.0 → sigma_max,
+            # 1.0 → sigma_min, so the active window is sigma_end <= sigma <= sigma_start.
+            sigma = float(timestep.max().item())
+            if not (sigma_end <= sigma <= sigma_start):
+                return apply_model(input_x, timestep, **c)
 
             # Anima latent shape: (B, C, T, H, W) — take spatial dims from the tail.
             latent_h, latent_w = int(input_x.shape[-2]), int(input_x.shape[-1])
