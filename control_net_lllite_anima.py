@@ -156,12 +156,15 @@ class _Conditioning1(nn.Module):
         n_resblocks: int,
         use_aspp: bool = False,
         aspp_dilations: Tuple[int, ...] = ASPP_DEFAULT_DILATIONS,
+        cond_in_channels: int = 3,
     ):
         super().__init__()
         assert cond_dim % 2 == 0, f"cond_dim must be even, got {cond_dim}"
+        assert cond_in_channels >= 1, f"cond_in_channels must be >= 1, got {cond_in_channels}"
         ch_half = cond_dim // 2
 
-        self.conv1 = nn.Conv2d(3, ch_half, kernel_size=4, stride=4, padding=0)
+        self.cond_in_channels = cond_in_channels
+        self.conv1 = nn.Conv2d(cond_in_channels, ch_half, kernel_size=4, stride=4, padding=0)
         self.norm1 = _gn(ch_half)
         self.conv2 = nn.Conv2d(ch_half, ch_half, kernel_size=3, stride=1, padding=1)
         self.norm2 = _gn(ch_half)
@@ -327,6 +330,8 @@ class ControlNetLLLiteDiT(nn.Module):
         cond_resblocks: int = 1,
         use_aspp: bool = False,
         aspp_dilations: Tuple[int, ...] = ASPP_DEFAULT_DILATIONS,
+        cond_in_channels: int = 3,
+        inpaint_masked_input: bool = False,
     ):
         super().__init__()
 
@@ -342,10 +347,15 @@ class ControlNetLLLiteDiT(nn.Module):
         self.cond_resblocks = cond_resblocks
         self.use_aspp = use_aspp
         self.aspp_dilations = tuple(aspp_dilations) if use_aspp else ()
+        # 4ch (RGB+mask) inpainting metadata. `inpaint_masked_input` records the training-time
+        # RGB-masking policy for cond_image preparation; it does not alter the forward pass here.
+        self.cond_in_channels = cond_in_channels
+        self.inpaint_masked_input = inpaint_masked_input
 
         self.conditioning1 = _Conditioning1(
             cond_dim, cond_emb_dim, cond_resblocks,
             use_aspp=use_aspp, aspp_dilations=aspp_dilations,
+            cond_in_channels=cond_in_channels,
         )
 
         modules = self._create_modules(dit, cond_emb_dim, mlp_dim, atomics, dropout, multiplier)
@@ -358,11 +368,16 @@ class ControlNetLLLiteDiT(nn.Module):
             m._depth_embeds_ref = [self.depth_embeds]
 
         aspp_info = f"aspp={'on' + str(list(self.aspp_dilations)) if use_aspp else 'off'}"
+        inpaint_info = (
+            f", inpaint=on(masked_input={inpaint_masked_input})" if cond_in_channels != 3 else ""
+        )
         logger.info(
             "ControlNet-LLLite (Anima v%s): created %d modules for target=%r "
-            "(atomics=%s), cond_dim=%d, cond_resblocks=%d, %s, cond_emb_dim=%d, mlp_dim=%d",
+            "(atomics=%s), cond_in_channels=%d, cond_dim=%d, cond_resblocks=%d, %s, "
+            "cond_emb_dim=%d, mlp_dim=%d%s",
             LLLITE_ARCH_VERSION, n, target_layers, list(atomics),
-            cond_dim, cond_resblocks, aspp_info, cond_emb_dim, mlp_dim,
+            cond_in_channels, cond_dim, cond_resblocks, aspp_info, cond_emb_dim, mlp_dim,
+            inpaint_info,
         )
 
     @staticmethod
